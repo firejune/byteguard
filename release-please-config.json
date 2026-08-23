@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "node",
+  "bump-minor-pre-major": true,
+  "bootstrap-sha": "c8f53b62d71240ff2f2382bc89d6e0d37644c038",
+  "pull-request-title-pattern": "release: ${component} v${version}",
+  "group-pull-request-title-pattern": "release: ${branch}",
+  "packages": {
+    "packages/byteguard": {
+      "package-name": "byteguard"
+    },
+    "packages/vite-plugin-byteguard": {
+      "package-name": "vite-plugin-byteguard"
+    }
+  },
+  "plugins": [{ "type": "node-workspace" }]
+}

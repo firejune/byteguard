@@ -1,0 +1,4 @@
+{
+  "packages/byteguard": "0.4.1",
+  "packages/vite-plugin-byteguard": "0.4.1"
+}
