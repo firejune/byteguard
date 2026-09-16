@@ -26,14 +26,28 @@ export default {
   plugins: [
     byteguard({
       algorithm: 'xor',   // or 'aes-gcm'
-      exclude: ['**/worker-*.js']
+      exclude: ['**/legacy-*.js']
     })
   ]
 }
 ```
 
+The key travels in the file by default. To leave it out, compress the payload,
+and encode workers as well:
+
+```js
+byteguard({
+  algorithm: 'aes-gcm',
+  keySource: 'native',   // the page supplies the key at runtime
+  key: myKeyBytes,       // the same bytes the device will return
+  compress: 'gzip',      // gzip, then encrypt
+  workers: true          // start these with loadWorker, not new Worker
+})
+```
+
 See [`packages/vite-plugin-byteguard`](packages/vite-plugin-byteguard) for the full
-option list.
+option list, and [`packages/byteguard`](packages/byteguard) for the binary format
+and the `byteguard/runtime` half that runs in the page.
 
 ## License
 
