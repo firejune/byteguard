@@ -3,6 +3,7 @@ import { createDecipheriv } from 'node:crypto'
 import { encode } from '../src/encoder'
 import { generateLoader } from '../src/decoder'
 import { ALG_AES_GCM, ALG_XOR, MAGIC, VERSION } from '../src/types'
+import { runLoader } from './helpers/run-loader'
 
 const SOURCE = 'const secret = "in the bundle"; console.log(secret)'
 const XOR_KEY = new Uint8Array(Array.from({ length: 16 }, (_, i) => i * 3 + 1))
@@ -208,9 +209,13 @@ describe('keySource', () => {
         keySource: 'native',
         key: XOR_KEY
       })
-      expect(await runLoader(bin, 'xor', { keySource: 'native' }, XOR_KEY)).toBe(
-        SOURCE
-      )
+      expect(
+        await runLoader({
+          bin,
+          options: { keySource: 'native' },
+          provider: XOR_KEY
+        })
+      ).toBe(SOURCE)
     })
 
     it('should fall back to the header key when the provider is empty', async () => {
@@ -220,12 +225,10 @@ describe('keySource', () => {
         key: XOR_KEY
       })
       expect(
-        await runLoader(
+        await runLoader({
           bin,
-          'xor',
-          { keySource: 'native', fallback: 'header' },
-          undefined
-        )
+          options: { keySource: 'native', fallback: 'header' }
+        })
       ).toBe(SOURCE)
     })
 
@@ -235,7 +238,7 @@ describe('keySource', () => {
         key: XOR_KEY
       })
       await expect(
-        runLoader(bin, 'xor', { keySource: 'native' }, undefined)
+        runLoader({ bin, options: { keySource: 'native' } })
       ).rejects.toThrow(/no key/)
     })
 
@@ -245,7 +248,11 @@ describe('keySource', () => {
         key: XOR_KEY
       })
       expect(
-        await runLoader(bin, 'xor', { keySource: 'native' }, () => XOR_KEY)
+        await runLoader({
+          bin,
+          options: { keySource: 'native' },
+          provider: () => XOR_KEY
+        })
       ).toBe(SOURCE)
     })
 
@@ -258,9 +265,13 @@ describe('keySource', () => {
         XOR_KEY.byteOffset,
         XOR_KEY.byteOffset + XOR_KEY.byteLength
       )
-      expect(await runLoader(bin, 'xor', { keySource: 'native' }, buffer)).toBe(
-        SOURCE
-      )
+      expect(
+        await runLoader({
+          bin,
+          options: { keySource: 'native' },
+          provider: buffer
+        })
+      ).toBe(SOURCE)
     })
 
     it('should accept a promise from the provider', async () => {
@@ -269,12 +280,12 @@ describe('keySource', () => {
         key: AES_KEY
       })
       expect(
-        await runLoader(
+        await runLoader({
           bin,
-          'aes-gcm',
-          { keySource: 'native' },
-          Promise.resolve(AES_KEY)
-        )
+          algorithm: 'aes-gcm',
+          options: { keySource: 'native' },
+          provider: Promise.resolve(AES_KEY)
+        })
       ).toBe(SOURCE)
     })
   })
@@ -282,47 +293,4 @@ describe('keySource', () => {
 
 function keyLen(bin: Uint8Array): number {
   return bin[6] | (bin[7] << 8)
-}
-
-/**
- * Run a generated loader for real: stub `fetch` and the execution sink, put
- * the key where the page would put it, and return the source the loader was
- * about to run. This is what the browser does, minus the <script> tag.
- */
-async function runLoader(
-  bin: Uint8Array,
-  algorithm: 'xor' | 'aes-gcm',
-  options: Parameters<typeof generateLoader>[3],
-  provider: unknown
-): Promise<string> {
-  const loader = generateLoader('./entry.bin', algorithm, false, options)
-  const scope: Record<string, unknown> = {
-    __byteguardKey: provider,
-    fetch: async (url: string) => {
-      if (url !== './entry.bin') throw new Error(`unexpected fetch: ${url}`)
-      return {
-        arrayBuffer: async () =>
-          bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.byteLength)
-      }
-    },
-    crypto: globalThis.crypto
-  }
-
-  let ran = ''
-  // The classic loader ends in `(new Function(t))()`; hand it a Function that
-  // records its argument instead of executing the bundle.
-  const capture = function (source: string) {
-    ran = source
-    return () => {}
-  }
-
-  const scoped = new Function(
-    'globalThis',
-    'fetch',
-    'crypto',
-    'Function',
-    `return ${loader}`
-  )
-  await scoped(scope, scope.fetch, scope.crypto, capture)
-  return ran
 }

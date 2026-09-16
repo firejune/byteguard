@@ -6,6 +6,21 @@ export type KeySource = 'header' | 'native'
 /** What the loader does when a `native` key provider yields nothing. */
 export type KeyFallback = 'none' | 'header'
 
+/** Payload compression, applied before encryption. */
+export type Compression = 'none' | 'gzip'
+
+/**
+ * Which inflate the loader uses.
+ *
+ * - `'auto'` — `DecompressionStream('gzip')` when the engine has it, the
+ *   inlined decoder otherwise. The only value with a fallback.
+ * - `'native'` — `DecompressionStream` only; smallest loader, and it fails
+ *   outright on engines without it (Safari before 16.4).
+ * - `'inline'` — the inlined decoder always. `'fflate'` is accepted as an
+ *   alias for the same thing; the implementation is byteguard's own.
+ */
+export type InflateMode = 'auto' | 'native' | 'inline' | 'fflate'
+
 export interface ByteGuardOptions {
   /** Encoding algorithm. Default: 'xor' */
   algorithm?: Algorithm
@@ -39,13 +54,28 @@ export interface ByteGuardOptions {
    * makes the build reproducible instead of randomly keyed.
    */
   key?: Uint8Array | (() => Uint8Array)
+  /**
+   * Compress the payload before encrypting it. Default: 'none'.
+   *
+   * The order is fixed — obfuscate, gzip, encrypt — because ciphertext does
+   * not compress. A compressed payload sets a flag byte the v1 layout has no
+   * room for, so these files are written as version 2.
+   */
+  compress?: Compression
+  /** Which inflate the loader uses. Default: 'auto' */
+  inflate?: InflateMode
 }
 
 /** Binary format magic bytes: "BGRD" */
 export const MAGIC = new Uint8Array([0x42, 0x47, 0x52, 0x44])
 export const VERSION = 0x01
+/** Layout with a flags byte, written only when a flag is set. */
+export const VERSION_FLAGS = 0x02
 export const ALG_XOR = 0x01
 export const ALG_AES_GCM = 0x02
+
+/** Version 2 flags: bit 0 — the payload is gzipped. */
+export const FLAG_GZIP = 0x01
 
 /** Default global the generated loader reads a `native` key from. */
 export const DEFAULT_KEY_PROVIDER = '__byteguardKey'

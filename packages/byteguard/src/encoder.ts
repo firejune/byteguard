@@ -1,5 +1,6 @@
-import { MAGIC, VERSION, ALG_XOR, ALG_AES_GCM } from './types'
-import type { Algorithm, KeyFallback, KeySource } from './types'
+import { gzipSync } from 'node:zlib'
+import { MAGIC, VERSION, VERSION_FLAGS, FLAG_GZIP, ALG_XOR, ALG_AES_GCM } from './types'
+import type { Algorithm, Compression, KeyFallback, KeySource } from './types'
 import { xorEncode } from './algorithms/xor'
 import { aesEncode } from './algorithms/aes'
 
@@ -12,20 +13,31 @@ export interface EncodeOptions {
   fallback?: KeyFallback
   /** Key bytes to encrypt with. Required when `keySource` is 'native'. */
   key?: Uint8Array | (() => Uint8Array)
+  /** Compress the payload before encrypting it. Default: 'none' */
+  compress?: Compression
 }
 
 /**
  * Encode a JS string into ByteGuard binary format.
  *
- * Binary layout:
+ * Version 1 (unflagged payload — what every release before 0.5 wrote):
  *   [Magic 4B] [Version 1B] [Algorithm 1B] [KeyLen 2B LE] [Key NB]
+ *   [AES-GCM only: IVLen 1B] [IV MB]
+ *   [Payload]
+ *
+ * Version 2 (a flag is set — today, only `compress: 'gzip'`):
+ *   [Magic 4B] [Version 1B] [Algorithm 1B] [Flags 1B] [KeyLen 2B LE] [Key NB]
  *   [AES-GCM only: IVLen 1B] [IV MB]
  *   [Payload]
  *
  * `KeyLen` is 0 when the key is not in the file (`keySource: 'native'` with
  * no header fallback). Every field is length-prefixed and the algorithm byte
  * says whether an IV section follows, so an absent key shortens the header
- * without making it ambiguous — the version byte stays at 1.
+ * without making it ambiguous — that alone never bumps the version. The
+ * flags byte does, because it is the one field a v1 reader cannot skip.
+ *
+ * Order is obfuscate (the caller's job), then gzip, then encrypt: ciphertext
+ * does not compress.
  */
 export function encode(
   js: string,
@@ -33,8 +45,11 @@ export function encode(
   keySize: number = 32,
   options: EncodeOptions = {}
 ): Uint8Array {
-  const { keySource = 'header', fallback = 'none' } = options
-  const data = new TextEncoder().encode(js)
+  const { keySource = 'header', fallback = 'none', compress = 'none' } = options
+  const text = new TextEncoder().encode(js)
+  const gzipped = compress === 'gzip'
+  const data = gzipped ? new Uint8Array(gzipSync(text)) : text
+  const flags = gzipped ? FLAG_GZIP : 0
   const suppliedKey = resolveKey(options.key)
 
   if (keySource === 'native' && !suppliedKey) {
@@ -50,10 +65,16 @@ export function encode(
 
   if (algorithm === 'xor') {
     const { encoded, key } = xorEncode(data, keySize, suppliedKey)
-    return packBinary(ALG_XOR, headerKey(key, keySource, fallback), encoded)
+    return packBinary(ALG_XOR, headerKey(key, keySource, fallback), encoded, flags)
   } else {
     const { encoded, key, iv } = aesEncode(data, keySize, suppliedKey)
-    return packBinary(ALG_AES_GCM, headerKey(key, keySource, fallback), encoded, iv)
+    return packBinary(
+      ALG_AES_GCM,
+      headerKey(key, keySource, fallback),
+      encoded,
+      flags,
+      iv
+    )
   }
 }
 
@@ -77,10 +98,13 @@ function packBinary(
   algorithm: number,
   key: Uint8Array,
   payload: Uint8Array,
+  flags: number,
   iv?: Uint8Array
 ): Uint8Array {
   const ivSection = iv ? 1 + iv.length : 0
-  const headerSize = MAGIC.length + 1 + 1 + 2 + key.length + ivSection
+  const flagSection = flags ? 1 : 0
+  const headerSize =
+    MAGIC.length + 1 + 1 + flagSection + 2 + key.length + ivSection
   const result = new Uint8Array(headerSize + payload.length)
   let offset = 0
 
@@ -88,11 +112,15 @@ function packBinary(
   result.set(MAGIC, offset)
   offset += MAGIC.length
 
-  // Version
-  result[offset++] = VERSION
+  // Version — bumped only when the header grows a field older readers would
+  // mistake for the start of the key length.
+  result[offset++] = flags ? VERSION_FLAGS : VERSION
 
   // Algorithm ID
   result[offset++] = algorithm
+
+  // Flags (version 2 only)
+  if (flags) result[offset++] = flags
 
   // Key length (uint16 LE) — 0 when the key is not in the file
   result[offset++] = key.length & 0xff
