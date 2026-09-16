@@ -64,6 +64,18 @@ export interface ByteGuardOptions {
   compress?: Compression
   /** Which inflate the loader uses. Default: 'auto' */
   inflate?: InflateMode
+  /**
+   * Also encode worker bundles. Default: false.
+   *
+   * - `true` — every emitted `.js` asset, which is how the bundler hands
+   *   over a worker build.
+   * - `string[]` — glob patterns, matched against emitted `.js` assets and
+   *   non-entry chunks.
+   *
+   * An encoded worker is no longer loadable by `new Worker(url)`; the page
+   * has to start it with `loadWorker` from `byteguard/runtime`.
+   */
+  workers?: boolean | string[]
 }
 
 /** Binary format magic bytes: "BGRD" */
