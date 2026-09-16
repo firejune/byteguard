@@ -3,6 +3,10 @@ export { generateLoader } from './decoder'
 export { xorEncode } from './algorithms/xor'
 export { aesEncode } from './algorithms/aes'
 export { byteguardInflate, INFLATE_SOURCE } from './runtime/inflate'
+// Also reachable as `byteguard/runtime`, which is the import app code should
+// use: this entry pulls in node:crypto and node:zlib for the encoder.
+export { loadWorker } from './runtime/worker'
+export type { LoadWorkerOptions, KeyMaterial } from './runtime/worker'
 export {
   MAGIC,
   VERSION,
