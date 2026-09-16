@@ -1,12 +1,34 @@
 import type { Plugin } from 'vite'
 import type { OutputAsset, OutputChunk } from 'rollup'
 import type { ByteGuardOptions } from 'byteguard'
-import { encode, generateLoader } from 'byteguard'
+import { encode, generateLoader, DEFAULT_KEY_PROVIDER } from 'byteguard'
 
-export type { ByteGuardOptions, Algorithm } from 'byteguard'
+export type {
+  ByteGuardOptions,
+  Algorithm,
+  KeySource,
+  KeyFallback,
+  Compression,
+  InflateMode
+} from 'byteguard'
 
 export default function byteguard(options: ByteGuardOptions = {}): Plugin {
-  const { algorithm = 'xor', keySize = 32, exclude = [], extension = 'bin' } = options
+  const {
+    algorithm = 'xor',
+    keySize = 32,
+    exclude = [],
+    extension = 'bin',
+    keySource = 'header',
+    keyProvider = DEFAULT_KEY_PROVIDER,
+    fallback = 'none',
+    key,
+    compress = 'none',
+    inflate = 'auto',
+    workers = false
+  } = options
+
+  const encodeOptions = { keySource, fallback, key, compress }
+  const loaderOptions = { keySource, keyProvider, fallback, compress, inflate }
 
   return {
     name: 'vite-plugin-byteguard',
@@ -24,10 +46,30 @@ export default function byteguard(options: ByteGuardOptions = {}): Plugin {
         jsChunks.set(fileName, chunk)
       }
 
-      if (jsChunks.size === 0) return
+      // Worker bundles are a separate rollup build that Vite emits into this
+      // one — as an *asset*, not a chunk, which is why the entry-chunk pass
+      // above has always walked past them.
+      const workerFiles = collectWorkers(bundle, workers, exclude, jsChunks)
+
+      if (jsChunks.size === 0 && workerFiles.size === 0) return
+
+      // Worker names have to be settled before any code is encoded: the entry
+      // holds the worker's URL as a plain string, and that string has to point
+      // at the .bin before it goes under the cipher.
+      const workerBins = new Map<string, string>()
+      for (const fileName of workerFiles.keys()) {
+        workerBins.set(fileName, binName(fileName, extension))
+      }
+
+      // Every surviving chunk, encoded or not, has to follow the rename.
+      for (const item of Object.values(bundle)) {
+        if (item.type !== 'chunk') continue
+        item.code = rewriteWorkerUrls(item.code, workerBins)
+      }
+
+      const binMap = new Map<string, string>()
 
       // Encode each entry chunk → .bin
-      const binMap = new Map<string, string>()
       for (const [fileName, chunk] of jsChunks) {
         // The directory prefix of the entry chunk (e.g. "assets/")
         const dir = fileName.substring(0, fileName.lastIndexOf('/') + 1)
@@ -46,8 +88,8 @@ export default function byteguard(options: ByteGuardOptions = {}): Plugin {
             const absPath = resolvePath(dir, relPath)
             return `import(new URL("${absPath}",document.baseURI).href)`
           })
-        const encoded = encode(code, algorithm, keySize)
-        const binFileName = fileName.replace(/\.js$/, `.${extension}`)
+        const encoded = encode(code, algorithm, keySize, encodeOptions)
+        const binFileName = binName(fileName, extension)
 
         this.emitFile({
           type: 'asset',
@@ -56,6 +98,22 @@ export default function byteguard(options: ByteGuardOptions = {}): Plugin {
         })
 
         binMap.set(fileName, binFileName)
+        delete bundle[fileName]
+      }
+
+      // Encode each worker → .bin. No import.meta.url or dynamic-import
+      // rewriting here: those rewrites resolve against `document`, which a
+      // worker does not have. A worker chunk that needs them is not a
+      // candidate for encoding — see the README.
+      for (const [fileName, source] of workerFiles) {
+        const binFileName = workerBins.get(fileName) as string
+
+        this.emitFile({
+          type: 'asset',
+          fileName: binFileName,
+          source: encode(rewriteWorkerUrls(source, workerBins), algorithm, keySize, encodeOptions)
+        })
+
         delete bundle[fileName]
       }
 
@@ -71,7 +129,7 @@ export default function byteguard(options: ByteGuardOptions = {}): Plugin {
 
           html = html.replace(scriptRe, (_match, pre: string) => {
             const isModule = /type\s*=\s*["']module["']/.test(pre)
-            const loader = generateLoader(`./${binFileName}`, algorithm, isModule)
+            const loader = generateLoader(`./${binFileName}`, algorithm, isModule, loaderOptions)
             return `<script>${loader}</script>`
           })
         }
@@ -79,13 +137,80 @@ export default function byteguard(options: ByteGuardOptions = {}): Plugin {
         ;(asset as OutputAsset).source = html
       }
 
-      const names = [...binMap.values()].join(', ')
-      console.log(`\x1b[36m[byteguard]\x1b[0m Encoded ${binMap.size} chunk(s) with ${algorithm}: ${names}`)
+      const names = [...binMap.values(), ...workerBins.values()].join(', ')
+      const count = binMap.size + workerBins.size
+      console.log(`\x1b[36m[byteguard]\x1b[0m Encoded ${count} chunk(s) with ${algorithm}: ${names}`)
     }
   }
 }
 
+/**
+ * Worker bundles in the output, as `fileName -> source`.
+ *
+ * Vite emits them as assets, but a `workers` pattern may also name a
+ * non-entry chunk, so both are searched. Entry chunks are never candidates.
+ */
+function collectWorkers(
+  bundle: Record<string, OutputChunk | OutputAsset>,
+  workers: boolean | string[],
+  exclude: string[],
+  entries: Map<string, OutputChunk>
+): Map<string, string> {
+  const found = new Map<string, string>()
+  if (workers === false) return found
+
+  for (const [fileName, item] of Object.entries(bundle)) {
+    if (!fileName.endsWith('.js')) continue
+    if (entries.has(fileName)) continue
+    if (item.type === 'chunk' && item.isEntry) continue
+    if (isExcluded(fileName, exclude)) continue
+
+    if (workers === true) {
+      // Vite emits a worker bundle as an asset; a plain chunk here is a
+      // dynamic import, which still has to be loadable as JavaScript.
+      if (item.type !== 'asset') continue
+    } else if (!matches(fileName, workers)) {
+      continue
+    }
+
+    found.set(
+      fileName,
+      item.type === 'chunk'
+        ? item.code
+        : typeof item.source === 'string'
+          ? item.source
+          : new TextDecoder().decode(item.source)
+    )
+  }
+
+  return found
+}
+
+/**
+ * Point references at the encoded worker.
+ *
+ * Vite writes the worker's URL into its consumer as a plain string literal —
+ * both for `new Worker(new URL('./x.worker.js', import.meta.url))` and for
+ * `import url from './x.worker.js?worker&url'` — so renaming the file means
+ * replacing that literal wherever it appears.
+ */
+function rewriteWorkerUrls(code: string, workerBins: Map<string, string>): string {
+  let out = code
+  for (const [fileName, binFileName] of workerBins) {
+    out = out.split(fileName).join(binFileName)
+  }
+  return out
+}
+
+function binName(fileName: string, extension: string): string {
+  return fileName.replace(/\.js$/, `.${extension}`)
+}
+
 function isExcluded(fileName: string, patterns: string[]): boolean {
+  return matches(fileName, patterns)
+}
+
+function matches(fileName: string, patterns: string[]): boolean {
   return patterns.some(pattern => {
     if (pattern.includes('*')) {
       const re = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$')
