@@ -178,7 +178,9 @@ function aesDecodeSnippet(
   inflate: InflateMode
 ): string {
   const iv = layout.key + 1
-  const plain = compress === 'gzip' ? 'new Uint8Array(dc)' : 'dc'
+  // WebCrypto hands back an ArrayBuffer; the inflate wants a view, and it is
+  // worth naming rather than building twice inside a ternary over megabytes.
+  const view = compress === 'gzip' ? [`const p=new Uint8Array(dc)`] : []
   return (
     inflateSnippet(compress, inflate) +
     [
@@ -189,7 +191,8 @@ function aesDecodeSnippet(
       `const d=b.slice(${iv}+kl+il)`,
       `const ck=await crypto.subtle.importKey('raw',k,'AES-GCM',false,['decrypt'])`,
       `const dc=await crypto.subtle.decrypt({name:'AES-GCM',iv},ck,d)`,
-      textSnippet(plain, compress)
+      ...view,
+      textSnippet(compress === 'gzip' ? 'p' : 'dc', compress)
     ].join(';')
   )
 }
